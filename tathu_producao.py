@@ -668,7 +668,10 @@ def rasterize_forecasts_combined(systems_det, forecasts_dict, reference_tiff_pat
     band = ds_out.GetRasterBand(1); band.SetNoDataValue(0); band.Fill(0)
     mem_drv = ogr.GetDriverByName('Memory')
     srs = osr.SpatialReference(); srs.ImportFromEPSG(4326)
-    order = ['det',20,40,60]; order = list(reversed(order)) if earliest_priority else order
+    order = ['det',20,40,60]
+    if earliest_priority:
+        order.reverse()
+
     def burn(systems,value):
         if not systems:
             return
@@ -684,9 +687,15 @@ def rasterize_forecasts_combined(systems_det, forecasts_dict, reference_tiff_pat
                 layer.CreateFeature(f); f=None
         gdal.RasterizeLayer(ds_out,[1],layer,burn_values=[value],options=['ALL_TOUCHED=TRUE'])
         layer=None
-    burn(systems_det,codes['det'])
-    for t in [20,40,60]:
-        burn(forecasts_dict.get(t,[]), codes.get(t,0))
+
+    systems_by_stage = {
+        'det': systems_det,
+        20: forecasts_dict.get(20,[]),
+        40: forecasts_dict.get(40,[]),
+        60: forecasts_dict.get(60,[])
+    }
+    for stage in order:
+        burn(systems_by_stage[stage], codes.get(stage,0))
     ds_out=None
 
 def get_tiff_extent_and_resolution_km(tiff_path):
