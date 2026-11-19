@@ -411,7 +411,7 @@ def build_motion_forecasts(systems_prev2, systems_prev1, systems_curr, ts_prev2,
                 angdiff = _angle_diff_deg(bearing01, bearing10)
                 w = 0.3 if angdiff <= MATCH_MAX_ANGLE_DIFF_DEG else 0.1
                 vx = (1.0 - w) * vx1 + w * vx0
-                vy = (1.0 - w) * vy0 + w * vy0
+                vy = (1.0 - w) * vy1 + w * vy0
                 spd_mpm = math.hypot(vx, vy)
                 if spd_mpm > max_v_mpm and max_v_mpm > 0:
                     sv = max_v_mpm / spd_mpm
