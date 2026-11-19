@@ -4,6 +4,7 @@ import glob
 import re
 import copy
 import shutil
+import json
 from datetime import datetime, timedelta
 from tathu.satellite import goes16
 from tathu.tracking import detectors, descriptors, forecasters, trackers
@@ -228,7 +229,7 @@ def main():
                 earliest_priority=False
             )
             info(f"GeoTIFF de previsão (somente horizontes +20/+40/+60) preparado: {forecast_run_path}")
-            publish_run_outputs(ts_str, detection_run_path, forecast_run_path)
+            publish_run_outputs(ts_str, detection_run_path, forecast_run_path, systems_curr, forecasts_motion)
         except Exception as ex:
             warn(f"Falha ao rasterizar/publicar previsão: {ex}")
 
@@ -768,35 +769,145 @@ def rasterize_forecasts_only(forecasts_dict, reference_tiff_path, out_tif_path, 
     ds_out = None; ref = None
 
 
-def publish_run_outputs(timestamp, detection_path, forecast_path):
-    """Arquiva o par da rodada e atualiza os dois arquivos operacionais mais recentes."""
+def _system_geojson_feature(system, timestamp, system_id, stage, lead_min=None):
+    """Converte um sistema detectado ou previsto em uma Feature GeoJSON."""
+    geom = getattr(system, 'geom', None)
+    if geom is None:
+        return None
+
+    try:
+        geometry = json.loads(geom.ExportToJson())
+    except Exception as ex:
+        warn(f"Falha ao serializar geometria GeoJSON de {system_id}: {ex}")
+        return None
+
+    area_km2 = None
+    try:
+        area_km2 = float(geom.GetArea()) / 1_000_000.0
+    except Exception:
+        pass
+
+    properties = {
+        "system_id": system_id,
+        "timestamp": timestamp,
+        "stage": stage,
+        "event": str(getattr(system, 'event', '') or stage),
+        "lead_min": lead_min,
+        "area_km2": area_km2
+    }
+    return {
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": properties
+    }
+
+
+def _build_run_features(timestamp, systems_det, forecasts_dict):
+    features = []
+    for index, system in enumerate(systems_det or [], start=1):
+        feature = _system_geojson_feature(
+            system, timestamp, f"OBS_{timestamp}_{index:03d}", "detection"
+        )
+        if feature:
+            features.append(feature)
+
+    for lead in (20, 40, 60):
+        for index, system in enumerate((forecasts_dict or {}).get(lead, []), start=1):
+            feature = _system_geojson_feature(
+                system, timestamp, f"FCST_{timestamp}_{lead}_{index:03d}",
+                "forecast", lead_min=lead
+            )
+            if feature:
+                features.append(feature)
+    return features
+
+
+def _write_feature_collection(path, features):
+    """Grava GeoJSON como FeatureCollection usando escrita atômica."""
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = path + '.tmp'
+    collection = {
+        "type": "FeatureCollection",
+        "name": os.path.splitext(os.path.basename(path))[0],
+        "features": features
+    }
+    with open(temporary_path, 'w', encoding='utf-8') as stream:
+        json.dump(collection, stream, ensure_ascii=False, separators=(',', ':'))
+    os.replace(temporary_path, path)
+
+
+def _append_run_to_geojson_history(history_path, new_features):
+    """Acrescenta observações da rodada ao histórico consolidado sem sobrescrever rodadas anteriores."""
+    existing_features = []
+    if os.path.exists(history_path):
+        with open(history_path, 'r', encoding='utf-8') as stream:
+            existing = json.load(stream)
+        if existing.get('type') != 'FeatureCollection' or not isinstance(existing.get('features'), list):
+            raise RuntimeError(f"Histórico GeoJSON inválido: {history_path}")
+        existing_features = existing['features']
+
+    # Evita duplicação caso a mesma rodada seja reprocessada.
+    run_timestamps = {
+        feature.get('properties', {}).get('timestamp')
+        for feature in new_features
+    }
+    existing_features = [
+        feature for feature in existing_features
+        if feature.get('properties', {}).get('timestamp') not in run_timestamps
+    ]
+    _write_feature_collection(history_path, existing_features + new_features)
+
+
+def _atomic_copy(source, destination):
+    temporary_destination = destination + '.tmp'
+    shutil.copy2(source, temporary_destination)
+    os.replace(temporary_destination, destination)
+
+
+def publish_run_outputs(timestamp, detection_path, forecast_path, systems_det, forecasts_dict):
+    """Publica produtos por timestamp, GeoJSON da rodada e histórico acumulado."""
     if not os.path.exists(detection_path):
         raise RuntimeError(f"Raster de detecção não encontrado: {detection_path}")
     if not os.path.exists(forecast_path):
         raise RuntimeError(f"Raster de previsão não encontrado: {forecast_path}")
 
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    run_id = timestamp
-    history_path = os.path.join(HISTORY_DIR, run_id)
-    if os.path.exists(history_path):
-        run_id = f"{timestamp}__run_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        history_path = os.path.join(HISTORY_DIR, run_id)
-    os.makedirs(history_path, exist_ok=False)
+    os.makedirs(OUTPUTS_SHP_DIR, exist_ok=True)
+    history_dir = os.path.join(OUTPUTS_SHP_DIR, 'historico')
+    os.makedirs(history_dir, exist_ok=True)
 
-    archived_detection = os.path.join(history_path, 'deteccao.tif')
-    archived_forecast = os.path.join(history_path, 'previsao.tif')
-    shutil.copy2(detection_path, archived_detection)
-    shutil.copy2(forecast_path, archived_forecast)
+    # Produtos imutáveis da rodada, diretamente na raiz de produção.
+    detection_archive = os.path.join(OUTPUTS_SHP_DIR, f"deteccao_{timestamp}.tif")
+    forecast_archive = os.path.join(OUTPUTS_SHP_DIR, f"previsao_{timestamp}.tif")
+    forecast_geojson = os.path.join(OUTPUTS_SHP_DIR, f"previsao_{timestamp}.geojson")
+    run_history_geojson = os.path.join(OUTPUTS_SHP_DIR, f"historico_{timestamp}.geojson")
+    consolidated_history = os.path.join(history_dir, 'sistemas_historico.geojson')
 
+    # IDs são únicos dentro da rodada nesta primeira etapa. A associação persistente
+    # entre rodadas será adicionada na etapa seguinte, sem alterar o forecast atual.
+    run_features = _build_run_features(timestamp, systems_det, forecasts_dict)
+    detection_features = [
+        feature for feature in run_features
+        if feature.get('properties', {}).get('stage') == 'detection'
+    ]
+    forecast_features = [
+        feature for feature in run_features
+        if feature.get('properties', {}).get('stage') == 'forecast'
+    ]
+
+    _atomic_copy(detection_path, detection_archive)
+    _atomic_copy(forecast_path, forecast_archive)
+    _write_feature_collection(forecast_geojson, forecast_features)
+    _write_feature_collection(run_history_geojson, detection_features)
+    _append_run_to_geojson_history(consolidated_history, detection_features)
+
+    # Produtos operacionais apontam sempre para a última rodada publicada.
     latest_detection = os.path.join(OUTPUTS_SHP_DIR, 'deteccao_atual.tif')
     latest_forecast = os.path.join(OUTPUTS_SHP_DIR, 'previsao_atual.tif')
-    for source, destination in (
-        (detection_path, latest_detection),
-        (forecast_path, latest_forecast)
-    ):
-        temporary_destination = destination + '.tmp'
-        shutil.copy2(source, temporary_destination)
-        os.replace(temporary_destination, destination)
+    latest_forecast_geojson = os.path.join(OUTPUTS_SHP_DIR, 'previsao_atual.geojson')
+    _atomic_copy(detection_path, latest_detection)
+    _atomic_copy(forecast_path, latest_forecast)
+    _atomic_copy(forecast_geojson, latest_forecast_geojson)
 
     for temporary_path in (detection_path, forecast_path):
         try:
@@ -804,8 +915,11 @@ def publish_run_outputs(timestamp, detection_path, forecast_path):
         except OSError:
             pass
 
-    info(f"Histórico da rodada arquivado em: {history_path}")
-    info(f"Arquivos atuais atualizados: {latest_detection} e {latest_forecast}")
+    info(f"Produtos da rodada publicados: {detection_archive}, {forecast_archive}")
+    info(f"GeoJSON de previsão: {forecast_geojson}")
+    info(f"Histórico da rodada: {run_history_geojson}")
+    info(f"Histórico acumulado: {consolidated_history}")
+    info(f"Produtos atuais atualizados: {latest_detection}, {latest_forecast}, {latest_forecast_geojson}")
 
 
 def rasterize_forecasts_combined(systems_det, forecasts_dict, reference_tiff_path, out_tif_path, codes=None, earliest_priority=False):
