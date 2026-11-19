@@ -781,19 +781,12 @@ def _system_geojson_feature(system, timestamp, system_id, stage, lead_min=None):
         warn(f"Falha ao serializar geometria GeoJSON de {system_id}: {ex}")
         return None
 
-    area_km2 = None
-    try:
-        area_km2 = float(geom.GetArea()) / 1_000_000.0
-    except Exception:
-        pass
-
     properties = {
         "system_id": system_id,
         "timestamp": timestamp,
         "stage": stage,
         "event": str(getattr(system, 'event', '') or stage),
-        "lead_min": lead_min,
-        "area_km2": area_km2
+        "lead_min": lead_min
     }
     return {
         "type": "Feature",
