@@ -7,14 +7,18 @@ from tathu.satellite import goes16
 from tathu.tracking import detectors, descriptors, forecasters, trackers
 from tathu.tracking.utils import area2degrees
 import requests
+from dotenv import load_dotenv
+
+# Carrega variáveis do arquivo .env (quando disponível)
+load_dotenv()
 
 # DIRETÓRIOS
 # Diretório de entrada
 INPUT_DIR = 'https://ftp.monitor.geopixel.com.br/goes_temp/'
 
-#credenciais Diretório Ambiental
-SERVER_USERNAME = 'monitor'
-SERVER_PASSWORD = 'geopx!monitor'
+# Credenciais do diretório ambiental (definidas no arquivo .env ou no ambiente)
+SERVER_USERNAME = os.getenv('SERVER_USERNAME')
+SERVER_PASSWORD = os.getenv('SERVER_PASSWORD')
 
 #Diretório de saída
 TEMP_DIR = './temp_goes_data'       #Alterar para o diretório ambiental
@@ -83,9 +87,12 @@ def download_file(url: str, dst_path: str, username: str, password: str):
     return dst_path
 
 def main():
+    if not SERVER_USERNAME or not SERVER_PASSWORD:
+        raise RuntimeError(
+            'Credenciais ausentes. Configure SERVER_USERNAME e SERVER_PASSWORD no arquivo .env.'
+        )
 
-
-    # Baixa últimos 2 TIFFs do servidor (tempo real)
+    # Baixa últimos 3 TIFFs do servidor (tempo real)
     try:
         prev2_url, prev1_url, curr_url = find_last_three_tiff_remote(INPUT_DIR, SERVER_USERNAME, SERVER_PASSWORD)
         os.makedirs(TEMP_DIR, exist_ok=True)
