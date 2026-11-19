@@ -2,6 +2,7 @@
 import os
 import glob
 import re
+import copy
 from datetime import datetime, timedelta
 from tathu.satellite import goes16
 from tathu.tracking import detectors, descriptors, forecasters, trackers
@@ -33,6 +34,7 @@ RESOLUTION_KM = 2.0          # resolução da grade quando usa extent (km)
 SMOOTH_ITERATIONS = 8        # iterações de suavização de contorno (Chaikin)
 MAX_VEL_MPS = 45             # velocidade máxima de deslocamento (m/s)
 MATCH_MIN_OVERLAP = 0.1      # sobreposição mínima p/ casar sistemas
+TRACKING_OVERLAP_THRESHOLD = 0.1  # critério relativo de sobreposição do tracker UBA
 MATCH_MAX_ANGLE_DIFF_DEG = 90  # tolerância de ângulo entre passos (°)
 VEL_DECAY = {20: 0.85, 40: 0.75, 60: 0.65}  # redução da velocidade por horizonte
 MAX_DISP_KM = {20: 30, 40: 60, 60: 90}      # teto de deslocamento por horizonte (km)
@@ -187,6 +189,12 @@ def main():
             s.timestamp = ts_prev1
         info(f"Sistemas detectados (prev1 {os.path.basename(prev1_path)}): {len(systems_prev1)}")
 
+        # Rastreamento UBA em cópias: diagnóstico sem alterar detecção ou forecast atual.
+        try:
+            run_uba_tracking_diagnostics(systems_prev2, systems_prev1, systems_curr)
+        except Exception as ex:
+            warn(f"Falha no diagnóstico de tracking UBA; forecast atual será mantido: {ex}")
+
         # Construção de previsão por deslocamento usando prev2->prev1->curr
         intervals = [20, 40, 60]
         m_ts = re.search(r'_(\d{12})', os.path.basename(curr_path))
@@ -339,6 +347,61 @@ class _SysWrap:
         self.geom = geom
         self.timestamp = timestamp
         self.event = event
+
+def _clone_systems_for_tracking(systems):
+    """Cria cópias isoladas para o tracker UBA, sem alterar as detecções originais."""
+    cloned = []
+    for system in systems:
+        item = copy.copy(system)
+        item.geom = system.geom.Clone() if getattr(system, 'geom', None) else None
+        item.relationships = []
+        item.attrs = dict(getattr(system, 'attrs', {}) or {})
+        item.layers = dict(getattr(system, 'layers', {}) or {})
+        cloned.append(item)
+    return cloned
+
+
+def run_uba_tracking_diagnostics(systems_prev2, systems_prev1, systems_curr):
+    """
+    Executa o rastreamento temporal original da UBA em cópias dos sistemas.
+    O resultado é diagnóstico nesta etapa: não modifica o forecast atual.
+    """
+    tracking_prev2 = _clone_systems_for_tracking(systems_prev2)
+    tracking_prev1_all = _clone_systems_for_tracking(systems_prev1)
+    tracking_prev1 = list(tracking_prev1_all)
+    tracking_curr_all = _clone_systems_for_tracking(systems_curr)
+    tracking_curr = list(tracking_curr_all)
+
+    strategy = trackers.RelativeOverlapAreaStrategy(TRACKING_OVERLAP_THRESHOLD)
+
+    if tracking_prev2 and tracking_prev1:
+        trackers.OverlapAreaTracker(tracking_prev2, strategy=strategy).track(tracking_prev1)
+
+    if tracking_prev1:
+        trackers.OverlapAreaTracker(tracking_prev1, strategy=strategy).track(tracking_curr)
+
+    event_counts = {}
+    relationship_counts = {}
+    for system in tracking_curr_all:
+        event = getattr(system, 'event', None)
+        event_name = getattr(event, 'name', str(event))
+        event_counts[event_name] = event_counts.get(event_name, 0) + 1
+        relation_count = len(getattr(system, 'relationships', []) or [])
+        relationship_counts[relation_count] = relationship_counts.get(relation_count, 0) + 1
+
+    event_summary = ', '.join(
+        f"{name}={count}" for name, count in sorted(event_counts.items())
+    ) or "nenhum sistema"
+    relation_summary = ', '.join(
+        f"{count} relação(ões): {total}" for count, total in sorted(relationship_counts.items())
+    ) or "sem relações"
+
+    info(
+        "Tracking UBA prev1->curr: "
+        f"{event_summary}; relações por núcleo: {relation_summary}; "
+        f"mantidos pelo tracker={len(tracking_curr)}/{len(tracking_curr_all)}"
+    )
+
 
 def build_motion_forecasts(systems_prev2, systems_prev1, systems_curr, ts_prev2, ts_prev1, ts_curr, intervals):
     fc = {t: [] for t in intervals}
