@@ -830,7 +830,7 @@ def _write_feature_collection(path, features):
     os.replace(temporary_path, path)
 
 
-def _append_run_to_geojson_history(history_path, new_features):
+def _append_run_to_geojson_history(history_path, timestamp, new_features):
     """Acrescenta observações da rodada ao histórico consolidado sem sobrescrever rodadas anteriores."""
     existing_features = []
     if os.path.exists(history_path):
@@ -841,13 +841,9 @@ def _append_run_to_geojson_history(history_path, new_features):
         existing_features = existing['features']
 
     # Evita duplicação caso a mesma rodada seja reprocessada.
-    run_timestamps = {
-        feature.get('properties', {}).get('timestamp')
-        for feature in new_features
-    }
     existing_features = [
         feature for feature in existing_features
-        if feature.get('properties', {}).get('timestamp') not in run_timestamps
+        if feature.get('properties', {}).get('timestamp') != timestamp
     ]
     _write_feature_collection(history_path, existing_features + new_features)
 
@@ -892,7 +888,7 @@ def publish_run_outputs(timestamp, detection_path, forecast_path, systems_det, f
     _atomic_copy(forecast_path, forecast_archive)
     _write_feature_collection(forecast_geojson, forecast_features)
     _write_feature_collection(run_history_geojson, detection_features)
-    _append_run_to_geojson_history(consolidated_history, detection_features)
+    _append_run_to_geojson_history(consolidated_history, timestamp, detection_features)
 
     # Produtos operacionais apontam sempre para a última rodada publicada.
     latest_detection = os.path.join(OUTPUTS_SHP_DIR, 'deteccao_atual.tif')
