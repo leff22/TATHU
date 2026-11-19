@@ -3,6 +3,7 @@ import os
 import glob
 import re
 import copy
+import shutil
 from datetime import datetime, timedelta
 from tathu.satellite import goes16
 from tathu.tracking import detectors, descriptors, forecasters, trackers
@@ -24,6 +25,7 @@ SERVER_PASSWORD = os.getenv('SERVER_PASSWORD')
 #Diretório de saída
 TEMP_DIR = './temp_goes_data'       #Alterar para o diretório ambiental
 OUTPUTS_SHP_DIR = './saidas_detecao_script'     #Alterar para o diretório ambiental
+HISTORY_DIR = os.path.join(OUTPUTS_SHP_DIR, 'historico')
 
 #CONSTANTES
 # Parâmetros de detecção P/ CÉLULAS CONVECTIVAS INTENSAS
@@ -158,19 +160,19 @@ def main():
     descriptors.StatisticalDescriptor().describe(grid_det, systems_curr)
     info(f"Sistemas detectados (curr): {len(systems_curr)}")
 
-    # Export shapefile t0
+    # Detecção da rodada: arquivo temporário para publicação junto com a previsão.
     os.makedirs(OUTPUTS_SHP_DIR, exist_ok=True)
     m_ts = re.search(r'_(\d{12})', os.path.basename(curr_path))
     ts_str = m_ts.group(1) if m_ts else os.path.splitext(os.path.basename(curr_path))[0]
-    if systems_curr:
-        try:
-            out_tif_det = os.path.join(OUTPUTS_SHP_DIR, f"{ts_str}.tif")
-            rasterize_systems_to_tif(systems_curr, curr_path, out_tif_det)
-            info(f"GeoTIFF detecção gravado: {out_tif_det}")
-        except Exception as ex:
-            warn(f"Falha ao rasterizar detecção: {ex}")
-    else:
-        warn("Nenhum sistema detectado; GeoTIFF não será criado.")
+    detection_run_path = os.path.join(OUTPUTS_SHP_DIR, f".{ts_str}_deteccao_tmp.tif")
+    try:
+        rasterize_systems_to_tif(systems_curr, curr_path, detection_run_path)
+        info(f"GeoTIFF de detecção da rodada preparado: {detection_run_path}")
+        if not systems_curr:
+            info("Nenhum sistema detectado nesta rodada; raster de detecção vazio será preservado.")
+    except Exception as ex:
+        error(f"Falha ao rasterizar detecção: {ex}")
+        return
 
     # Forecast usa a mesma sequência prev2/prev1/curr selecionada acima.
     if not (prev1_path and curr_path):
@@ -217,11 +219,18 @@ def main():
         forecasts_motion = build_motion_forecasts(systems_prev2, systems_prev1, systems_curr, ts_prev2, ts_prev1, ts_curr, intervals)
 
         try:
-            out_comb = os.path.join(OUTPUTS_SHP_DIR, f"{ts_str}_forecast.tif")
-            rasterize_forecasts_combined(systems_curr, {20: forecasts_motion.get(20, []), 40: forecasts_motion.get(40, []), 60: forecasts_motion.get(60, [])}, curr_path, out_comb, codes={'det': 1, 20: 2, 40: 3, 60: 4}, earliest_priority=False)
-            info(f"GeoTIFF forecast deslocamento (3 imagens) gravado: {out_comb}")
+            forecast_run_path = os.path.join(OUTPUTS_SHP_DIR, f".{ts_str}_previsao_tmp.tif")
+            rasterize_forecasts_only(
+                {20: forecasts_motion.get(20, []), 40: forecasts_motion.get(40, []), 60: forecasts_motion.get(60, [])},
+                curr_path,
+                forecast_run_path,
+                codes={20: 2, 40: 3, 60: 4},
+                earliest_priority=False
+            )
+            info(f"GeoTIFF de previsão (somente horizontes +20/+40/+60) preparado: {forecast_run_path}")
+            publish_run_outputs(ts_str, detection_run_path, forecast_run_path)
         except Exception as ex:
-            warn(f"Falha ao rasterizar forecast deslocamento: {ex}")
+            warn(f"Falha ao rasterizar/publicar previsão: {ex}")
 
     # Merge (sem atributos de cor/lead); overlay opcional com cor única
     info("Merge desativado: previsão gravada em único GeoTIFF por timestamp.")
@@ -690,9 +699,9 @@ def merge_shapefiles(input_paths, output_path):
     info(f"Shapefile mesclado gravado ({written} features): {output_path}")
 def rasterize_systems_to_tif(systems, reference_tiff_path, out_tif_path):
     from osgeo import gdal, ogr, osr
-    if not systems:
-        return
     ref = gdal.Open(reference_tiff_path)
+    if ref is None:
+        raise RuntimeError(f"Não foi possível abrir TIFF de referência: {reference_tiff_path}")
     drv = gdal.GetDriverByName('GTiff')
     xsize = ref.RasterXSize; ysize = ref.RasterYSize
     gt = ref.GetGeoTransform(); proj = ref.GetProjection()
@@ -713,6 +722,91 @@ def rasterize_systems_to_tif(systems, reference_tiff_path, out_tif_path):
             layer.CreateFeature(f); f=None
     gdal.RasterizeLayer(ds_out,[1],layer,burn_values=[1],options=['ALL_TOUCHED=TRUE'])
     ds_out=None; layer=None
+
+
+def rasterize_forecasts_only(forecasts_dict, reference_tiff_path, out_tif_path, codes=None, earliest_priority=False):
+    """Gera raster contendo exclusivamente os horizontes de previsão (+20/+40/+60)."""
+    from osgeo import gdal, ogr, osr
+    if codes is None:
+        codes = {20: 2, 40: 3, 60: 4}
+    ref = gdal.Open(reference_tiff_path)
+    if ref is None:
+        raise RuntimeError(f"Não foi possível abrir TIFF de referência: {reference_tiff_path}")
+    drv = gdal.GetDriverByName('GTiff')
+    xsize = ref.RasterXSize; ysize = ref.RasterYSize
+    gt = ref.GetGeoTransform(); proj = ref.GetProjection()
+    ds_out = drv.Create(out_tif_path, xsize, ysize, 1, gdal.GDT_UInt16, options=['TILED=YES','COMPRESS=LZW'])
+    if ds_out is None:
+        raise RuntimeError(f"Não foi possível criar raster de previsão: {out_tif_path}")
+    ds_out.SetGeoTransform(gt); ds_out.SetProjection(proj)
+    band = ds_out.GetRasterBand(1); band.SetNoDataValue(0); band.Fill(0)
+    mem_drv = ogr.GetDriverByName('Memory')
+    srs = osr.SpatialReference(); srs.ImportFromEPSG(4326)
+    order = [20, 40, 60]
+    if earliest_priority:
+        order.reverse()
+
+    def burn(systems, value):
+        if not systems:
+            return
+        ds_mem = mem_drv.CreateDataSource('mem')
+        layer = ds_mem.CreateLayer('layer', srs, geom_type=ogr.wkbPolygon)
+        for system in systems:
+            if getattr(system, 'geom', None):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                try:
+                    geom_sm = smooth_polygon_chaikin(system.geom, iterations=SMOOTH_ITERATIONS)
+                    feature.SetGeometry(geom_sm if geom_sm else system.geom)
+                except Exception:
+                    feature.SetGeometry(system.geom)
+                layer.CreateFeature(feature); feature = None
+        gdal.RasterizeLayer(ds_out, [1], layer, burn_values=[value], options=['ALL_TOUCHED=TRUE'])
+        layer = None; ds_mem = None
+
+    for stage in order:
+        burn(forecasts_dict.get(stage, []), codes.get(stage, 0))
+    ds_out = None; ref = None
+
+
+def publish_run_outputs(timestamp, detection_path, forecast_path):
+    """Arquiva o par da rodada e atualiza os dois arquivos operacionais mais recentes."""
+    if not os.path.exists(detection_path):
+        raise RuntimeError(f"Raster de detecção não encontrado: {detection_path}")
+    if not os.path.exists(forecast_path):
+        raise RuntimeError(f"Raster de previsão não encontrado: {forecast_path}")
+
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    run_id = timestamp
+    history_path = os.path.join(HISTORY_DIR, run_id)
+    if os.path.exists(history_path):
+        run_id = f"{timestamp}__run_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        history_path = os.path.join(HISTORY_DIR, run_id)
+    os.makedirs(history_path, exist_ok=False)
+
+    archived_detection = os.path.join(history_path, 'deteccao.tif')
+    archived_forecast = os.path.join(history_path, 'previsao.tif')
+    shutil.copy2(detection_path, archived_detection)
+    shutil.copy2(forecast_path, archived_forecast)
+
+    latest_detection = os.path.join(OUTPUTS_SHP_DIR, 'deteccao_atual.tif')
+    latest_forecast = os.path.join(OUTPUTS_SHP_DIR, 'previsao_atual.tif')
+    for source, destination in (
+        (detection_path, latest_detection),
+        (forecast_path, latest_forecast)
+    ):
+        temporary_destination = destination + '.tmp'
+        shutil.copy2(source, temporary_destination)
+        os.replace(temporary_destination, destination)
+
+    for temporary_path in (detection_path, forecast_path):
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+
+    info(f"Histórico da rodada arquivado em: {history_path}")
+    info(f"Arquivos atuais atualizados: {latest_detection} e {latest_forecast}")
+
 
 def rasterize_forecasts_combined(systems_det, forecasts_dict, reference_tiff_path, out_tif_path, codes=None, earliest_priority=False):
     from osgeo import gdal, ogr, osr
