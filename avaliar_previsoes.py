@@ -344,8 +344,8 @@ def main():
         help="Horizontes a avaliar em minutos (padrão: 20)."
     )
     parser.add_argument(
-        "--max-match-distance-km", type=float, default=150.0,
-        help="Distância máxima entre centróides para aceitar uma associação (padrão: 150 km)."
+        "--max-match-distance-km", type=float, default=75.0,
+        help="Distância máxima entre centróides para aceitar uma associação (padrão: 75 km)."
     )
     parser.add_argument(
         "--output", default=None,
