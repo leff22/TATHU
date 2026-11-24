@@ -848,12 +848,6 @@ def _append_run_to_geojson_history(history_path, timestamp, new_features):
     _write_feature_collection(history_path, existing_features + new_features)
 
 
-def _atomic_copy(source, destination):
-    temporary_destination = destination + '.tmp'
-    shutil.copy2(source, temporary_destination)
-    os.replace(temporary_destination, destination)
-
-
 def publish_run_outputs(timestamp, detection_path, forecast_path, systems_det, forecasts_dict):
     """Publica produtos por timestamp, GeoJSON da rodada e histórico acumulado."""
     if not os.path.exists(detection_path):
@@ -890,14 +884,6 @@ def publish_run_outputs(timestamp, detection_path, forecast_path, systems_det, f
     _write_feature_collection(run_history_geojson, detection_features)
     _append_run_to_geojson_history(consolidated_history, timestamp, detection_features)
 
-    # Produtos operacionais apontam sempre para a última rodada publicada.
-    latest_detection = os.path.join(OUTPUTS_SHP_DIR, 'deteccao_atual.tif')
-    latest_forecast = os.path.join(OUTPUTS_SHP_DIR, 'previsao_atual.tif')
-    latest_forecast_geojson = os.path.join(OUTPUTS_SHP_DIR, 'previsao_atual.geojson')
-    _atomic_copy(detection_path, latest_detection)
-    _atomic_copy(forecast_path, latest_forecast)
-    _atomic_copy(forecast_geojson, latest_forecast_geojson)
-
     for temporary_path in (detection_path, forecast_path):
         try:
             os.remove(temporary_path)
@@ -908,7 +894,6 @@ def publish_run_outputs(timestamp, detection_path, forecast_path, systems_det, f
     info(f"GeoJSON de previsão: {forecast_geojson}")
     info(f"Histórico da rodada: {run_history_geojson}")
     info(f"Histórico acumulado: {consolidated_history}")
-    info(f"Produtos atuais atualizados: {latest_detection}, {latest_forecast}, {latest_forecast_geojson}")
 
 
 def rasterize_forecasts_combined(systems_det, forecasts_dict, reference_tiff_path, out_tif_path, codes=None, earliest_priority=False):
