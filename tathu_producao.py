@@ -878,8 +878,10 @@ def publish_run_outputs(timestamp, detection_path, forecast_path, systems_det, f
         if feature.get('properties', {}).get('stage') == 'forecast'
     ]
 
-    _atomic_copy(detection_path, detection_archive)
-    _atomic_copy(forecast_path, forecast_archive)
+    # Arquiva os rasters da rodada com seus nomes por timestamp.
+    # Não há cópias *_atual; os arquivos timestamped são os produtos oficiais.
+    shutil.copy2(detection_path, detection_archive)
+    shutil.copy2(forecast_path, forecast_archive)
     _write_feature_collection(forecast_geojson, forecast_features)
     _write_feature_collection(run_history_geojson, detection_features)
     _append_run_to_geojson_history(consolidated_history, timestamp, detection_features)
