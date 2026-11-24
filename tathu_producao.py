@@ -38,7 +38,7 @@ SMOOTH_ITERATIONS = 8        # iterações de suavização de contorno (Chaikin)
 MAX_VEL_MPS = 45             # velocidade máxima de deslocamento (m/s)
 MATCH_MIN_OVERLAP = 0.1      # sobreposição mínima p/ casar sistemas
 MATCH_MAX_ANGLE_DIFF_DEG = 90  # tolerância de ângulo entre passos (°)
-VEL_DECAY = {20: 0.85, 40: 0.75, 60: 0.65}  # redução da velocidade por horizonte
+VEL_DECAY = {20: 0.95, 40: 0.90, 60: 0.90}  # calibração inicial: reduz menos o deslocamento nos horizontes
 MAX_DISP_KM = {20: 30, 40: 60, 60: 90}      # teto de deslocamento por horizonte (km)
 
 # --- Listagem e download remotos dos TIFFs ---
