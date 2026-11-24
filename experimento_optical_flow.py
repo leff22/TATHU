@@ -176,6 +176,55 @@ def main():
     png_path = os.path.join(args.output_dir, f"optical_flow_{stamp}.png")
     json_path = os.path.join(args.output_dir, f"optical_flow_{stamp}.json")
 
+    # Diagnósticos adicionais para separar fluxo sobre nuvens de fluxo sobre
+    # superfície/textura quente. Os limiares são exploratórios em °C e não
+    # representam uma classificação operacional de nuvens.
+    cloud_masks = {
+        "bt_le_0C_both": interior & (prev <= 0.0) & (curr <= 0.0),
+        "bt_le_m20C_both": interior & (prev <= -20.0) & (curr <= -20.0),
+        "bt_le_m40C_both": interior & (prev <= -40.0) & (curr <= -40.0),
+    }
+    flow_magnitude_px = np.linalg.norm(flow, axis=2)
+    flow_stats = estatisticas("magnitude_pixels", flow_magnitude_px[interior])
+    dx_stats = estatisticas("dx_km", dx_km[interior])
+    dy_stats = estatisticas("dy_km", dy_km[interior])
+    speed_stats = estatisticas("speed_kmh", speed_kmh[interior])
+    speed_exceedance = {
+        str(limit): float(np.mean(speed_kmh[interior] > limit) * 100.0)
+        for limit in (60, 80, 100, 120, 150, 200)
+    }
+    cloud_stats = {}
+    for label, mask in cloud_masks.items():
+        cloud_stats[label] = {
+            "pixel_count": int(mask.sum()),
+            "fraction_of_grid_percent": float(mask.mean() * 100.0),
+            "flow_pixels": estatisticas("magnitude_pixels", flow_magnitude_px[mask]),
+            "speed_kmh": estatisticas("speed_kmh", speed_kmh[mask]),
+            "fraction_speed_over_100_kmh_percent": (
+                float(np.mean(speed_kmh[mask] > 100.0) * 100.0) if np.any(mask) else None
+            ),
+        }
+
+    # Grade 4x4: ajuda a localizar numericamente regiões com fluxo extremo
+    # quando o usuário não consegue compartilhar a visualização PNG.
+    tile_diagnostics = []
+    nrows, ncols = prev.shape
+    for iy in range(4):
+        for ix in range(4):
+            y0, y1 = iy * nrows // 4, (iy + 1) * nrows // 4
+            x0, x1 = ix * ncols // 4, (ix + 1) * ncols // 4
+            mask = interior[y0:y1, x0:x1]
+            vals = speed_kmh[y0:y1, x0:x1][mask]
+            if vals.size:
+                tile_diagnostics.append({
+                    "tile_row": iy,
+                    "tile_col": ix,
+                    "valid_pixels": int(vals.size),
+                    "median_speed_kmh": float(np.median(vals)),
+                    "p90_speed_kmh": float(np.percentile(vals, 90)),
+                    "fraction_over_100_kmh_percent": float(np.mean(vals > 100.0) * 100.0),
+                })
+
     np.savez_compressed(
         npz_path,
         flow_px=flow,
@@ -184,6 +233,9 @@ def main():
         displacement_km=displacement_km.astype(np.float32),
         speed_kmh=speed_kmh.astype(np.float32),
         valid_mask=interior,
+        cloud_mask_bt_le_0C=cloud_masks["bt_le_0C_both"],
+        cloud_mask_bt_le_m20C=cloud_masks["bt_le_m20C_both"],
+        cloud_mask_bt_le_m40C=cloud_masks["bt_le_m40C_both"],
         geotransform=np.asarray(gt_prev),
     )
     visualization = salvar_visualizacao(flow, curr_img, interior)
@@ -208,9 +260,14 @@ def main():
             "poly_n": 7,
             "poly_sigma": 1.5,
         },
-        "flow_pixels": estatisticas("magnitude_pixels", np.linalg.norm(flow, axis=2)[interior]),
+        "flow_pixels": flow_stats,
+        "dx_km": dx_stats,
+        "dy_km": dy_stats,
         "displacement_km": estatisticas("displacement_km", displacement_km[interior]),
-        "speed_kmh": estatisticas("speed_kmh", speed_kmh[interior]),
+        "speed_kmh": speed_stats,
+        "speed_exceedance_percent": speed_exceedance,
+        "cloud_temperature_masks": cloud_stats,
+        "spatial_tiles_4x4": tile_diagnostics,
         "warning": (
             "Diagnóstico exploratório: fluxo de textura radiométrica não equivale "
             "automaticamente ao movimento de células convectivas. Validar vetores "
@@ -235,6 +292,28 @@ def main():
             f"p90={item.get('p90', float('nan')):.3f}; "
             f"p95={item.get('p95', float('nan')):.3f}; "
             f"máximo={item.get('max', float('nan')):.3f}"
+        )
+    print("Percentual de pixels acima de cada velocidade (km/h):")
+    for limit, pct in speed_exceedance.items():
+        print(f"  >{limit}: {pct:.2f}%")
+    print("Diagnóstico por limiar de temperatura (pixels nas duas imagens):")
+    for label, item in cloud_stats.items():
+        speed = item["speed_kmh"]
+        if speed["count"]:
+            print(
+                f"  {label}: n={item['pixel_count']}; "
+                f"mediana={speed['median']:.1f} km/h; "
+                f"p90={speed['p90']:.1f} km/h; "
+                f">100 km/h={item['fraction_speed_over_100_kmh_percent']:.1f}%"
+            )
+        else:
+            print(f"  {label}: sem pixels")
+    print("Grade espacial 4x4 (mediana/p90 km/h):")
+    for tile in tile_diagnostics:
+        print(
+            f"  [{tile['tile_row']},{tile['tile_col']}]: "
+            f"{tile['median_speed_kmh']:.1f}/{tile['p90_speed_kmh']:.1f} "
+            f"(>{100} km/h: {tile['fraction_over_100_kmh_percent']:.1f}%)"
         )
     print(f"NPZ: {npz_path}")
     print(f"PNG: {png_path}")
