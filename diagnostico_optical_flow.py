@@ -34,6 +34,47 @@ def listar_tiffs(input_dir):
 
 def descrever_array(nome, value):
     print(f"  {nome}: tipo={type(value).__module__}.{type(value).__name__}")
+
+    # goes16.rect2grid retorna um GDAL Dataset; ler a banda explicitamente.
+    if hasattr(value, "RasterXSize") and hasattr(value, "GetRasterBand"):
+        print(
+            f"    raster={value.RasterXSize} x {value.RasterYSize}; "
+            f"bandas={value.RasterCount}"
+        )
+        print(f"    geotransform={value.GetGeoTransform()}")
+        print(f"    projection={value.GetProjection()[:350]}")
+        for band_index in range(1, value.RasterCount + 1):
+            band = value.GetRasterBand(band_index)
+            arr = band.ReadAsArray()
+            nodata = band.GetNoDataValue()
+            print(
+                f"    banda {band_index}: tipo={gdal.GetDataTypeName(band.DataType)}; "
+                f"nodata={nodata}; escala={band.GetScale()}; offset={band.GetOffset()}"
+            )
+            if arr is None:
+                print("      ReadAsArray retornou None")
+                continue
+            valid = np.isfinite(arr)
+            if nodata is not None:
+                valid &= arr != nodata
+            count = int(valid.sum())
+            print(
+                f"      shape={arr.shape}; dtype={arr.dtype}; "
+                f"validos={count}/{arr.size}; invalidos={arr.size-count}"
+            )
+            if count:
+                vals = arr[valid].astype(np.float64, copy=False)
+                p = np.percentile(vals, [1, 5, 25, 50, 75, 95, 99])
+                print(
+                    f"      min={vals.min():.6g}; max={vals.max():.6g}; "
+                    f"media={vals.mean():.6g}; desvio={vals.std():.6g}"
+                )
+                print(
+                    "      percentis 1/5/25/50/75/95/99%="
+                    + ", ".join(f"{x:.6g}" for x in p)
+                )
+        return
+
     try:
         arr = np.asarray(value)
         print(f"    shape={arr.shape}; ndim={arr.ndim}; dtype={arr.dtype}")
