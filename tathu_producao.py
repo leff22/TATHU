@@ -462,6 +462,9 @@ def build_motion_forecasts(systems_prev2, systems_prev1, systems_curr, ts_prev2,
         from osgeo import osr
         src = osr.SpatialReference(); src.ImportFromEPSG(4326)
         dst = osr.SpatialReference(); dst.ImportFromEPSG(3857)
+        if hasattr(src, "SetAxisMappingStrategy"):
+            src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         to = osr.CoordinateTransformation(src, dst)
         def _centroid_xy_m(g):
             cg = g.Centroid(); cg.Transform(to); return cg.GetX(), cg.GetY()
@@ -540,6 +543,9 @@ def _translate_geom_m(geom, dx_m, dy_m):
     from osgeo import ogr, osr
     src = osr.SpatialReference(); src.ImportFromEPSG(4326)
     dst = osr.SpatialReference(); dst.ImportFromEPSG(3857)
+    if hasattr(src, "SetAxisMappingStrategy"):
+        src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     to = osr.CoordinateTransformation(src, dst)
     back = osr.CoordinateTransformation(dst, src)
     g = geom.Clone(); g.Transform(to)
