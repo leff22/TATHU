@@ -150,6 +150,21 @@ def main():
         flags=0,
     )
 
+    # Segundo método independente para comparação. TV-L1 recebe imagens float
+    # no intervalo [0, 1] e retorna (v, u); reorganizamos para (u, v).
+    from skimage.registration import optical_flow_tvl1
+    tvl1_raw = optical_flow_tvl1(
+        prev_img.astype(np.float32) / 255.0,
+        curr_img.astype(np.float32) / 255.0,
+        attachment=15,
+        tightness=0.3,
+        num_warp=5,
+        num_iter=10,
+        tol=0.0001,
+        prefilter=False,
+    )
+    flow_tvl1 = np.stack((tvl1_raw[1], tvl1_raw[0]), axis=-1).astype(np.float32)
+
     rows, cols = np.indices(prev.shape, dtype=np.float32)
     lat = gt_prev[3] + (rows + 0.5) * gt_prev[5]
     # Conversão local aproximada: graus de longitude variam com cos(latitude).
@@ -159,6 +174,11 @@ def main():
     dy_km = flow[..., 1] * gt_prev[5] * km_per_deg_lat
     displacement_km = np.hypot(dx_km, dy_km)
     speed_kmh = displacement_km / (interval_min / 60.0)
+
+    dx_tvl1_km = flow_tvl1[..., 0] * gt_prev[1] * km_per_deg_lon
+    dy_tvl1_km = flow_tvl1[..., 1] * gt_prev[5] * km_per_deg_lat
+    displacement_tvl1_km = np.hypot(dx_tvl1_km, dy_tvl1_km)
+    speed_tvl1_kmh = displacement_tvl1_km / (interval_min / 60.0)
 
     # Evita bordas da imagem, onde o algoritmo tende a produzir fluxo instável.
     interior = valid.copy()
@@ -185,7 +205,30 @@ def main():
         "bt_le_m40C_both": interior & (prev <= -40.0) & (curr <= -40.0),
     }
     flow_magnitude_px = np.linalg.norm(flow, axis=2)
+    flow_magnitude_tvl1_px = np.linalg.norm(flow_tvl1, axis=2)
     flow_stats = estatisticas("magnitude_pixels", flow_magnitude_px[interior])
+    tvl1_stats = estatisticas("magnitude_pixels", flow_magnitude_tvl1_px[interior])
+    speed_tvl1_stats = estatisticas("speed_kmh", speed_tvl1_kmh[interior])
+
+    # Concordância direcional entre métodos, excluindo vetores quase nulos.
+    mag_fb = flow_magnitude_px
+    mag_tv = flow_magnitude_tvl1_px
+    direction_mask = interior & (mag_fb > 0.5) & (mag_tv > 0.5)
+    if np.any(direction_mask):
+        dot = (
+            flow[..., 0] * flow_tvl1[..., 0]
+            + flow[..., 1] * flow_tvl1[..., 1]
+        )
+        cosine = np.clip(dot / np.maximum(mag_fb * mag_tv, 1e-6), -1.0, 1.0)
+        direction_difference_deg = np.degrees(np.arccos(cosine[direction_mask]))
+        direction_agreement = {
+            "pixel_count": int(direction_mask.sum()),
+            "median_angle_difference_deg": float(np.median(direction_difference_deg)),
+            "p90_angle_difference_deg": float(np.percentile(direction_difference_deg, 90)),
+            "fraction_within_30deg_percent": float(np.mean(direction_difference_deg <= 30) * 100.0),
+        }
+    else:
+        direction_agreement = {"pixel_count": 0}
     dx_stats = estatisticas("dx_km", dx_km[interior])
     dy_stats = estatisticas("dy_km", dy_km[interior])
     speed_stats = estatisticas("speed_kmh", speed_kmh[interior])
@@ -228,6 +271,8 @@ def main():
     np.savez_compressed(
         npz_path,
         flow_px=flow,
+        flow_tvl1_px=flow_tvl1,
+        speed_tvl1_kmh=speed_tvl1_kmh.astype(np.float32),
         dx_km=dx_km.astype(np.float32),
         dy_km=dy_km.astype(np.float32),
         displacement_km=displacement_km.astype(np.float32),
@@ -261,6 +306,13 @@ def main():
             "poly_sigma": 1.5,
         },
         "flow_pixels": flow_stats,
+        "tvl1_flow_pixels": tvl1_stats,
+        "tvl1_speed_kmh": speed_tvl1_stats,
+        "method_comparison": {
+            "direction_agreement": direction_agreement,
+            "farneback_speed_kmh": speed_stats,
+            "tvl1_speed_kmh": speed_tvl1_stats,
+        },
         "dx_km": dx_stats,
         "dy_km": dy_stats,
         "displacement_km": estatisticas("displacement_km", displacement_km[interior]),
@@ -293,7 +345,20 @@ def main():
             f"p95={item.get('p95', float('nan')):.3f}; "
             f"máximo={item.get('max', float('nan')):.3f}"
         )
-    print("Percentual de pixels acima de cada velocidade (km/h):")
+    print(
+        f"TV-L1: fluxo mediano={tvl1_stats.get('median', float('nan')):.3f} px; "
+        f"velocidade mediana={speed_tvl1_stats.get('median', float('nan')):.3f} km/h; "
+        f"p90={speed_tvl1_stats.get('p90', float('nan')):.3f}; "
+        f"p95={speed_tvl1_stats.get('p95', float('nan')):.3f}; "
+        f"máximo={speed_tvl1_stats.get('max', float('nan')):.3f}"
+    )
+    print(
+        "Concordância direcional Farneback x TV-L1: "
+        f"diferença angular mediana={direction_agreement.get('median_angle_difference_deg', float('nan')):.1f}°; "
+        f"p90={direction_agreement.get('p90_angle_difference_deg', float('nan')):.1f}°; "
+        f"vetores até 30°={direction_agreement.get('fraction_within_30deg_percent', float('nan')):.1f}%"
+    )
+    print("Percentual de pixels acima de cada velocidade (km/h) - Farneback:")
     for limit, pct in speed_exceedance.items():
         print(f"  >{limit}: {pct:.2f}%")
     print("Diagnóstico por limiar de temperatura (pixels nas duas imagens):")
